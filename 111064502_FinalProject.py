@@ -13,6 +13,8 @@ lmb = 1 / 3 # interarrival rate (unit: 1 / timesolt)
 T = 50      # total timeslots for the simulation
 K = 3       # K = 1 + (number of relays per sector)
 # T should be multiple of K
+# height: BS 25m; Relay 10m; UE 1.5m
+# carrier frequency fc = 700 MHZ
 
 class source:
     def __init__(self, X, Y):
@@ -41,16 +43,12 @@ class source:
         print("x =", "{:.3f}".format(self.x),
               "\ty =", "{:.3f}".format(self.y))
     def PacketGenerate(self):
-        # if it is the order-th UE, then it can begin
-        # at (K * order)-th timeslot
+    # as the order-th UE, begin at (K * order)-th timeslot
         # time starting to wait for packet
         t = K * (self.order) - K * Sector[self.sector]
         while t < T:
             t += random.expovariate(lmb)
             self.packetTime.append(t)
-        print("UE in this sector:", Sector[self.sector])
-        print("order =", self.order)
-        print(self.packetTime)  # for debug
     # discard packets that won't be sent
         # related to # of UE in this sector
         step = K * Sector[self.sector]
@@ -58,7 +56,6 @@ class source:
         TxTime = range(K * int(self.order), T + 1, step)
         i = len(self.packetTime) - 1
         j = len(TxTime) - 1
-        print("length of TxTime =", len(TxTime))  # for debug
         # packets arrive after the last transmission
         while self.packetTime[i] > TxTime[j]:
             self.packetTime.pop(i)
@@ -79,8 +76,43 @@ class source:
         # packet arrive before the first transmission
         while self.packetTime[1] <= K * (self.order):
             self.packetTime.pop(0)
-        print("After truncated:")        
-        print(self.packetTime)  # for debug
+    # compute LOS probability and Pathloss
+    def PLOS(self):
+        # distance to each relay
+        DR_2d = np.zeros([K - 1])
+        DR_3d = np.zeros([K - 1])
+        for i in range(K - 1):
+            DR_2d[i] = math.sqrt((self.x - Xr[self.sector][i])**2 
+                            + (self.x - Yr[self.sector][i])**2)
+            # height diff = 8.5m; 8.5 ** 2 = 72.25
+            DR_3d[i] = math.sqrt((DR_2d[i])**2 + 72.25)
+        # distance to BS
+        DBS_2d = math.sqrt((self.x)**2 + (self.y)**2)
+        DBS_3d = math.sqrt((DBS_2d)**2 + 552.25)
+        # LOS probability from this source to relay
+        self.LoS_R = np.zeros([K - 1], dtype = 'b')
+        for i in range(K - 1):
+            if DR_2d[i] <= 18:
+                self.LoS_R[i] = True
+            else:
+                PLoS = (18 / DR_2d[i]
+                + (1 - 18 / DR_2d[i]) * math.exp(DR_2d[i] / (-63)))
+                if random.random() < PLoS:
+                    self.LoS_R[i] = True
+                else:
+                    self.LoS_R[i] = False
+        # LOS probability to BS
+        if DR_2d[i] <= 18:
+            self.LoS_BS = True
+        else:
+            PLoS = (18 / DBS_2d
+            + (1 - 18 / DBS_2d) * math.exp(DBS_2d / (-63)))
+            if random.random() < PLoS:
+                self.LoS_BS = True
+            else:
+                self.LoS_BS = False
+        # Pathloss to relay
+            
 
 # Locations of UE
 X = np.array([-278.4520829528112, -267.652186218928,
@@ -97,13 +129,30 @@ Y = np.array([36.47148887813148, -376.4822964934558,
 -117.07630897682532, -295.32968595822604, 59.48309753052422,
 -234.46432177001606, 260.6832269364211, -47.958294309139546,
 -96.45572615294537, 199.25795360348002, -390.168611516649])
+# Location of Relays
+Xr = np.zeros([6, K - 1])
+Yr = np.zeros([6, K - 1])
+theta = math.pi / 6
+for i in range(6):
+    # relay 0: 10 degree clockwise from center
+    Xr[i][0] = 0.6 * R * math.cos(theta - math.pi / 18)
+    Yr[i][0] = 0.6 * R * math.sin(theta - math.pi / 18)
+    # relay 1: 10 degree counterclockwise from center
+    Xr[i][1] = 0.6 * R * math.cos(theta + math.pi / 18)
+    Yr[i][1] = 0.6 * R * math.sin(theta + math.pi / 18)
+    # if exist: relay 2: at the center
+    # Xr[i][2] = 0.6 * R * math.cos(theta)
+    # Yr[i][2] = 0.6 * R * math.sin(theta)
+    # increment theta to go to the next sector
+    theta += math.pi / 3
 
 S = []                  # list of all the N's UE
 # how many UE each sector contains
-Sector = np.zeros([6], dtype=int) 
+Sector = np.zeros([6], dtype = int) 
 for i in range(N):
     S.append(source(X[i], Y[i]))
 for i in range(N):      # put UE to corresponding sector
     S[i].order = Sector[S[i].sector]
     Sector[S[i].sector] += 1
-S[5].PacketGenerate()
+    S[i].PacketGenerate()   # pre-generate packets
+S[1].PLOS()
