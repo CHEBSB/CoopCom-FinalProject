@@ -6,6 +6,7 @@ Final Project
 import math
 import random
 import numpy as np
+import matplotlib.pyplot as plt
 
 N = 20      # number of UE
 R = 500     # cell radius
@@ -15,6 +16,22 @@ K = 3       # K = 1 + (number of relays per sector)
 # T should be multiple of K
 # height: BS 25m; Relay 10m; UE 1.5m
 # carrier frequency fc = 700 MHZ
+# breakpoint distance = 4 * fc / c * (h_UE - 1)(h_BS - 1)
+# dBP_SD = 24 * 0.5 * 2.33494867 * 4    # from UE to BS 
+dBP_SD = 112.077536 
+# dBP_SR = 9 * 0.5 * 2.33494867 * 4     # from UE to Relay
+dBP_SR = 42.029076
+# dBP_RD = 2017.39565                   # from Relay to BS
+# For computation of packet error probability
+r = 0.75        # equivalent code rate
+beta = 0.5 / math.pi * math.sqrt(128 / (4 ** r - 1))
+phi = 2 ** r - 1 - 0.5 / beta
+psi = 2 ** r - 1 + 0.5 / beta
+eph = math.e ** (-phi)
+eps = math.e ** (-psi)
+Pn = -134 + 10 * math.log10(18)     # noise power in dBm
+Pu = 23                             # UE power in dBm
+SNR_0 = Pu - Pn
 
 class source:
     def __init__(self, X, Y):
@@ -40,8 +57,8 @@ class source:
     def printS(self):
         print("{0}-th UE in the {1}-th sector:".format(
             int(self.order), self.sector))
-        print("x =", "{:.3f}".format(self.x),
-              "\ty =", "{:.3f}".format(self.y))
+        print("x =", "{:.2f}".format(self.x),
+              "\ty =", "{:.2f}".format(self.y))
     def PacketGenerate(self):
     # as the order-th UE, begin at (K * order)-th timeslot
         # time starting to wait for packet
@@ -53,24 +70,24 @@ class source:
         # related to # of UE in this sector
         step = K * Sector[self.sector]
         # timeslots at which this source can transmit
-        TxTime = range(K * int(self.order), T + 1, step)
+        self.TxTime = range(K * int(self.order), T, step)
         i = len(self.packetTime) - 1
-        j = len(TxTime) - 1
+        j = len(self.TxTime) - 1
         # packets arrive after the last transmission
-        while self.packetTime[i] > TxTime[j]:
+        while i >= 0 and self.packetTime[i] > self.TxTime[j]:
             self.packetTime.pop(i)
             i -= 1
         # timeslot of the last transmission
-        while self.packetTime[i] <= TxTime[j - 1]:
+        while self.packetTime[i] <= self.TxTime[j - 1]:
             j -= 1
         # not-the-freshest packets
         i -= 1
         while i >= 0 and j >= 1:
-            if self.packetTime[i] > TxTime[j - 1]:
+            if self.packetTime[i] > self.TxTime[j - 1]:
                 self.packetTime.pop(i)
             else:
                 while j >= 1 and self.packetTime[
-                    i] <= TxTime[j - 1]:
+                    i] <= self.TxTime[j - 1]:
                     j -= 1
             i -= 1
         # packet arrive before the first transmission
@@ -95,8 +112,8 @@ class source:
             if DR_2d[i] <= 18:
                 self.LoS_R[i] = True
             else:
-                PLoS = (18 / DR_2d[i]
-                + (1 - 18 / DR_2d[i]) * math.exp(DR_2d[i] / (-63)))
+                PLoS = (18 / DR_2d[i] + (1 - 18 / DR_2d[i])
+                         * math.exp(DR_2d[i] / (-63)))
                 if random.random() < PLoS:
                     self.LoS_R[i] = True
                 else:
@@ -111,8 +128,118 @@ class source:
                 self.LoS_BS = True
             else:
                 self.LoS_BS = False
-        # Pathloss to relay
-            
+        # Pathloss (in dB) to relay
+        # fc is measuered in GHz => 0.7 GHz
+        self.LossR = np.zeros([K - 1])
+        for i in range(K - 1):
+            # Pathloss given Line of Sight
+            if DR_2d[i] < dBP_SR:
+                self.LossR[i] = (28 
+                + 22 * math.log10(DR_3d[i]) - 3.0980392)
+            else:
+                self.LossR[i] = (28 + 40 * math.log10(DR_3d[i])
+                - 3.0980392 - 29.380583)
+            # average pathloss must be nonnegative
+            if self.LossR[i] < 0:
+                self.LossR[i] = 0
+            # w/out LOS, compute NLOS version and compare
+            if self.LoS_R[i] == False:
+                Loss_NLOS = (148.893292
+                + 40.32 * (math.log10(DR_3d[i]) - 3))
+                if Loss_NLOS > self.LossR[i]:
+                    self.LossR[i] = Loss_NLOS
+        # Pathloss (in dB) to BS
+        self.LossBS = 0.0
+        # Pathloss given Line of Sight
+        if DBS_2d < dBP_SD:
+            self.LossBS = (28 
+            + 22 * math.log10(DBS_3d) - 3.0980392)
+        else:
+            self.LossBS = (28 + 40 * math.log10(DBS_3d)
+            - 3.0980392 - 37.059504)
+        # pathloss must be nonnegative
+        if self.LossBS < 0:
+            self.LossBS = 0
+        # w/out LOS, compute NLOS version and compare
+        if self.LoS_BS == False:
+            Loss_NLOS =  (127.705816
+            + 39.086386 * (math.log10(DBS_3d) - 3))
+            if Loss_NLOS > self.LossBS:
+                self.LossBS = Loss_NLOS
+    # start simulation and compute AOI
+    def Transmit(self):
+        self.AOI = np.zeros([T])
+        # suppose last packet succeed, which
+        # at (K * (self.order) - K * Sector[self.sector])
+        # depart from UE, so BS decode and update AOI at 
+        # K * (self.order) - K * Sector[self.sector] + K
+        self.AOI[0] = K * (Sector[self.sector] - self.order
+                           - 1)
+        # relays that decode successful
+        helper = np.zeros([K - 1], dtype = 'b') 
+        # for each available timeslot
+        # i: broadcast, i + 1: relay 0, ...,
+        # i + K - 1: relay K - 2, i + K: BS decode 
+        i = 0
+        while (i < len(self.TxTime)
+               and self.TxTime[i] + K < T):
+            # 1. broadcast
+            # compute PER from UE to relays
+            for j in range(K - 1):
+                # generate Rayleigh fading coefficient
+                alpha = math.sqrt(random.gauss(0, 1) ** 2
+                                + random.gauss(0, 1) ** 2)
+                # subtracted by pathloss
+                SNR_dB = SNR_0 - self.LossR[j]
+                SNR = alpha * (10 ** (SNR_dB / 10))
+                # PER to relays
+                ErrProb = (1 - beta * SNR
+                           * (eph ** (1 / SNR) - eps ** (1 / SNR)))
+                # relay succeed to decode => help forward
+                if random.random() > ErrProb:
+                    helper[j] = True
+                else:
+                    helper[j] = False
+            # compute SNR received by BS
+            alpha = math.sqrt(random.gauss(0, 1) ** 2
+                            + random.gauss(0, 1) ** 2)
+            # subtracted by pathloss
+            SNR_dB = SNR_0 - self.LossBS
+            SNR = alpha * (10 ** (SNR_dB / 10))
+            # 2. relay transmission phase
+            for j in range(K - 1):
+                if helper[j] == True:
+                    alpha = (math.sqrt(random.gauss(0, 1) ** 2
+                                     + random.gauss(0, 1) ** 2)
+                            / math.sqrt(2))
+                    # subtracted by pathloss
+                    # assume relay power 0 dB greater than UE
+                    SNR_dB = SNR_0 + 0 - PLr[self.sector][j]
+                    SNR += alpha * (10 ** (SNR_dB / 10))
+            # 3. BS apply MRC and decode
+            ErrProb = (1 - beta * SNR
+                       * (eph ** (1 / SNR) - eps ** (1 / SNR)))
+            # information aging after last packet
+            if i == 0:
+                for j in range(1, self.TxTime[i] + K):
+                    self.AOI[j] = self.AOI[j - 1] + 1
+            else:
+                for j in range(self.TxTime[i - 1] + K + 1,
+                               self.TxTime[i] + K):
+                    self.AOI[j] = self.AOI[j - 1] + 1
+            # if success, reduce AOI
+            print("End-to-end SNR =", SNR)
+            if random.random() > ErrProb:
+                self.AOI[self.TxTime[i] + K] = K
+                print("transmission at", self.TxTime[i], "success!")
+            else:
+                self.AOI[self.TxTime[i] + K] = self.AOI[
+                                self.TxTime[i] + K - 1] + 1
+                print("transmission at", self.TxTime[i], "fail!")
+            i += 1  # looping index increment
+        # the rest of time, simply aging
+        for j in range(self.TxTime[i - 1] + K + 1, T):
+            self.AOI[j] = self.AOI[j - 1] + 1
 
 # Locations of UE
 X = np.array([-278.4520829528112, -267.652186218928,
@@ -132,6 +259,7 @@ Y = np.array([36.47148887813148, -376.4822964934558,
 # Location of Relays
 Xr = np.zeros([6, K - 1])
 Yr = np.zeros([6, K - 1])
+PLr = np.zeros([6, K - 1])  # Pathloss from relay to BS
 theta = math.pi / 6
 for i in range(6):
     # relay 0: 10 degree clockwise from center
@@ -145,7 +273,24 @@ for i in range(6):
     # Yr[i][2] = 0.6 * R * math.sin(theta)
     # increment theta to go to the next sector
     theta += math.pi / 3
-
+# compute pathloss from relay to BS
+# Shadowing is neglected
+# P_LOS = 18 / 300 + (1 - 18 / 300) * math.exp(300 / (-63))
+P_LOS = 0.06803635
+for i in range(6):
+    for j in range(K - 1):
+        # 0.6 R < breakpoint distance
+        # (28 + 22 * log10(sqrt(300 ** 2
+        # + 15 ** 2)) - 3.0980392)
+        if random.random() < P_LOS:
+            PLr[i][j] = 79.4105566
+        else:                       # non-LOS
+            PLr[i][j] = 102.1895676
+    # PLr[i][j] = (161.04 + 0.4 * log10(20)
+    # - (24.37 - 2.368) * log10(25)
+    # + (43.42 - 3.1 * log10(25)) * (log10(sqrt(90225)) - 3)
+    # - 3.0980392 - (3.2 * log10(17.625) * log10(17.625) - 4.97)
+    # - 0.6 * 8.5)
 S = []                  # list of all the N's UE
 # how many UE each sector contains
 Sector = np.zeros([6], dtype = int) 
@@ -154,5 +299,13 @@ for i in range(N):
 for i in range(N):      # put UE to corresponding sector
     S[i].order = Sector[S[i].sector]
     Sector[S[i].sector] += 1
+for i in range(N):
     S[i].PacketGenerate()   # pre-generate packets
-S[1].PLOS()
+    S[i].PLOS()             # compute pathloss
+    
+S[11].printS()
+print("UE in the sector:", Sector[S[11].sector])
+S[11].Transmit()
+plt.figure()
+line0, = plt.plot(range(0, T), S[11].AOI, '.-')
+plt.show()
