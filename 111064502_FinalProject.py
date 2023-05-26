@@ -8,11 +8,13 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 
+random.seed(1024)
 N = 20      # number of UE
 R = 500     # cell radius
 lmb = 1 / 3 # interarrival rate (unit: 1 / timesolt)
-T = 50      # total timeslots for the simulation
-K = 3       # K = 1 + (number of relays per sector)
+T = 10000   # total timeslots for the simulation
+K = 3       # K = 1 + (# of relays per sector)
+g = 0       # g = relay power (dBm) - UE power (dBm)
 # T should be multiple of K
 # height: BS 25m; Relay 10m; UE 1.5m
 # carrier frequency fc = 700 MHZ
@@ -22,15 +24,15 @@ dBP_SD = 112.077536
 # dBP_SR = 9 * 0.5 * 2.33494867 * 4     # from UE to Relay
 dBP_SR = 42.029076
 # dBP_RD = 2017.39565                   # from Relay to BS
-# For computation of packet error probability
-r = 0.75        # equivalent code rate
+# For packet error probability computation
+r = 0.75 * 2                # equivalent code rate
 beta = 0.5 / math.pi * math.sqrt(128 / (4 ** r - 1))
 phi = 2 ** r - 1 - 0.5 / beta
 psi = 2 ** r - 1 + 0.5 / beta
 eph = math.e ** (-phi)
 eps = math.e ** (-psi)
-Pn = -134 + 10 * math.log10(18)     # noise power in dBm
-Pu = 23                             # UE power in dBm
+Pn = -174 + 40 + 10 * math.log10(18)    # noise power in dBm
+Pu = 23                                 # UE power in dBm
 SNR_0 = Pu - Pn
 
 class source:
@@ -119,7 +121,7 @@ class source:
                 else:
                     self.LoS_R[i] = False
         # LOS probability to BS
-        if DR_2d[i] <= 18:
+        if DBS_2d <= 18:
             self.LoS_BS = True
         else:
             PLoS = (18 / DBS_2d
@@ -173,8 +175,7 @@ class source:
         # at (K * (self.order) - K * Sector[self.sector])
         # depart from UE, so BS decode and update AOI at 
         # K * (self.order) - K * Sector[self.sector] + K
-        self.AOI[0] = K * (Sector[self.sector] - self.order
-                           - 1)
+        self.AOI[0] = K * (Sector[self.sector] - self.order - 1)
         # relays that decode successful
         helper = np.zeros([K - 1], dtype = 'b') 
         # for each available timeslot
@@ -187,22 +188,25 @@ class source:
             # compute PER from UE to relays
             for j in range(K - 1):
                 # generate Rayleigh fading coefficient
-                alpha = math.sqrt(random.gauss(0, 1) ** 2
-                                + random.gauss(0, 1) ** 2)
+                alpha = (math.sqrt(random.gauss(0, 1) ** 2
+                                 + random.gauss(0, 1) ** 2)
+                        / math.sqrt(2))
                 # subtracted by pathloss
                 SNR_dB = SNR_0 - self.LossR[j]
                 SNR = alpha * (10 ** (SNR_dB / 10))
                 # PER to relays
                 ErrProb = (1 - beta * SNR
-                           * (eph ** (1 / SNR) - eps ** (1 / SNR)))
+                           * (math.exp(-1 * phi / SNR)
+                            - math.exp(-1 * psi / SNR)))
                 # relay succeed to decode => help forward
                 if random.random() > ErrProb:
                     helper[j] = True
                 else:
                     helper[j] = False
             # compute SNR received by BS
-            alpha = math.sqrt(random.gauss(0, 1) ** 2
-                            + random.gauss(0, 1) ** 2)
+            alpha = (math.sqrt(random.gauss(0, 1) ** 2
+                             + random.gauss(0, 1) ** 2)
+                    / math.sqrt(2))
             # subtracted by pathloss
             SNR_dB = SNR_0 - self.LossBS
             SNR = alpha * (10 ** (SNR_dB / 10))
@@ -213,12 +217,13 @@ class source:
                                      + random.gauss(0, 1) ** 2)
                             / math.sqrt(2))
                     # subtracted by pathloss
-                    # assume relay power 0 dB greater than UE
-                    SNR_dB = SNR_0 + 0 - PLr[self.sector][j]
+                    # relay power is g dB greater than UE
+                    SNR_dB = SNR_0 + g - PLr[self.sector][j]
                     SNR += alpha * (10 ** (SNR_dB / 10))
             # 3. BS apply MRC and decode
             ErrProb = (1 - beta * SNR
-                       * (eph ** (1 / SNR) - eps ** (1 / SNR)))
+                       * (math.exp(-1 * phi / SNR)
+                        - math.exp(-1 * psi / SNR)))
             # information aging after last packet
             if i == 0:
                 for j in range(1, self.TxTime[i] + K):
@@ -228,14 +233,13 @@ class source:
                                self.TxTime[i] + K):
                     self.AOI[j] = self.AOI[j - 1] + 1
             # if success, reduce AOI
-            print("End-to-end SNR =", SNR)
+            #print("End-to-end SNR =", SNR)
+            #print("Corresponding error prob:", ErrProb)
             if random.random() > ErrProb:
                 self.AOI[self.TxTime[i] + K] = K
-                print("transmission at", self.TxTime[i], "success!")
             else:
                 self.AOI[self.TxTime[i] + K] = self.AOI[
                                 self.TxTime[i] + K - 1] + 1
-                print("transmission at", self.TxTime[i], "fail!")
             i += 1  # looping index increment
         # the rest of time, simply aging
         for j in range(self.TxTime[i - 1] + K + 1, T):
@@ -261,18 +265,35 @@ Xr = np.zeros([6, K - 1])
 Yr = np.zeros([6, K - 1])
 PLr = np.zeros([6, K - 1])  # Pathloss from relay to BS
 theta = math.pi / 6
-for i in range(6):
-    # relay 0: 10 degree clockwise from center
-    Xr[i][0] = 0.6 * R * math.cos(theta - math.pi / 18)
-    Yr[i][0] = 0.6 * R * math.sin(theta - math.pi / 18)
-    # relay 1: 10 degree counterclockwise from center
-    Xr[i][1] = 0.6 * R * math.cos(theta + math.pi / 18)
-    Yr[i][1] = 0.6 * R * math.sin(theta + math.pi / 18)
-    # if exist: relay 2: at the center
-    # Xr[i][2] = 0.6 * R * math.cos(theta)
-    # Yr[i][2] = 0.6 * R * math.sin(theta)
-    # increment theta to go to the next sector
-    theta += math.pi / 3
+match K:
+    case 2:
+        for i in range(6):
+            # relay 0: at center
+            Xr[i][0] = 0.6 * R * math.cos(theta)
+            Yr[i][0] = 0.6 * R * math.sin(theta)
+            # increment theta to go to the next sector
+            theta += math.pi / 3
+    case 3:
+        for i in range(6):
+            # relay 0: 10 degree clockwise from center
+            Xr[i][0] = 0.6 * R * math.cos(theta - math.pi / 18)
+            Yr[i][0] = 0.6 * R * math.sin(theta - math.pi / 18)
+            # relay 1: 10 degree counterclockwise from center
+            Xr[i][1] = 0.6 * R * math.cos(theta + math.pi / 18)
+            Yr[i][1] = 0.6 * R * math.sin(theta + math.pi / 18)
+            theta += math.pi / 3
+    case 4: 
+        for i in range(6):
+            # relay 0: 10 degree clockwise from center
+            Xr[i][0] = 0.6 * R * math.cos(theta - math.pi / 18)
+            Yr[i][0] = 0.6 * R * math.sin(theta - math.pi / 18)
+            # relay 1: 10 degree counterclockwise from center
+            Xr[i][1] = 0.6 * R * math.cos(theta + math.pi / 18)
+            Yr[i][1] = 0.6 * R * math.sin(theta + math.pi / 18)
+            # relay 2: at center
+            Xr[i][2] = 0.6 * R * math.cos(theta)
+            Yr[i][2] = 0.6 * R * math.sin(theta)
+            theta += math.pi / 3
 # compute pathloss from relay to BS
 # Shadowing is neglected
 # P_LOS = 18 / 300 + (1 - 18 / 300) * math.exp(300 / (-63))
@@ -302,10 +323,9 @@ for i in range(N):      # put UE to corresponding sector
 for i in range(N):
     S[i].PacketGenerate()   # pre-generate packets
     S[i].PLOS()             # compute pathloss
-    
-S[11].printS()
-print("UE in the sector:", Sector[S[11].sector])
-S[11].Transmit()
-plt.figure()
-line0, = plt.plot(range(0, T), S[11].AOI, '.-')
-plt.show()
+aveAoI = 0                  # average AoI
+for i in range(N):
+    S[i].Transmit()         # simulate transmission
+    aveAoI += np.average(S[i].AOI)
+aveAoI = aveAoI / N
+print("average AoI:", "{:.4f}".format(aveAoI))
