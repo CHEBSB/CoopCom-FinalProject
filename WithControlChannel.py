@@ -6,7 +6,7 @@ Final Project
 import math
 import random
 import numpy as np
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 
 random.seed(1024)
 N = 20      # number of UE
@@ -14,8 +14,7 @@ R = 500     # cell radius
 lmb = 1 / 3 # interarrival rate (unit: 1 / timesolt)
 T = 10000   # total timeslots for the simulation
 K = 3       # K = 1 + (# of relays per sector)
-g = 0       # g = relay power (dBm) - UE power (dBm)
-# T should be multiple of K
+g = 5       # g = relay power (dBm) - UE power (dBm)
 # height: BS 25m; Relay 10m; UE 1.5m
 # carrier frequency fc = 700 MHZ
 # breakpoint distance = 4 * fc / c * (h_UE - 1)(h_BS - 1)
@@ -29,7 +28,7 @@ r = 0.75 * 2                # equivalent code rate
 beta = 0.5 / math.pi * math.sqrt(128 / (4 ** r - 1))
 phi = 2 ** r - 1 - 0.5 / beta
 psi = 2 ** r - 1 + 0.5 / beta
-Pn = -174 + 40 + 10 * math.log10(18)    # noise power in dBm
+Pn = -144 + 40 + 10 * math.log10(18)    # noise power in dBm
 Pu = 23                                 # UE power in dBm
 SNR_0 = Pu - Pn
 
@@ -52,23 +51,16 @@ class source:
             self.sector = 4
         else:
             self.sector = 5
-        # timings when packets are generated
-        self.packet = []
+        # timings for the current packet
+        self.packet = -2
+        self.nextPacket = 0     # next arrival
+        self.AoI_x = []         # timings of AoI update
+        self.AoI_y = []         # value for update
     def printS(self):
         print("{0}-th UE in the {1}-th sector:".format(
             int(self.order), self.sector))
         print("x =", "{:.2f}".format(self.x),
               "\ty =", "{:.2f}".format(self.y))
-    def PacketGenerate(self):
-    # as the order-th UE, begin at (K * order)-th timeslot
-        # time starting to wait for packet
-        t = K * (self.order) - K * Sector[self.sector]
-        while t < T:
-            t += random.expovariate(lmb)
-            self.packet.append(t)
-    # discard packets that arrive before the first transmission
-        while self.packet[1] <= K * (self.order):
-            self.packet.pop(0)
     # compute LOS probability and Pathloss
     def PLOS(self):
         # distance to each relay
@@ -142,14 +134,18 @@ class source:
             + 39.086386 * (math.log10(DBS_3d) - 3))
             if Loss_NLOS > self.LossBS:
                 self.LossBS = Loss_NLOS
-    def InitAoI(self):
-        # init with -1 (indicating undeclared)
-        self.AOI = np.full([T], -1) 
-        # suppose last packet succeed, which
-        # at (K * (self.order) - K * Sector[self.sector])
-        # depart from UE, so BS decode and update AOI at 
-        # K * (self.order) - K * Sector[self.sector] + K
-        self.AOI[0] = K * (Sector[self.sector] - self.order - 1)
+    def ComputeAoI(self):
+        L = len(self.AoI_x)
+        if (L != 0):
+            self.AoI = (self.AoI_x[0]) * (self.AoI_x[0])
+            for i in range(L - 1):
+                self.AoI += ((self.AoI_x[i + 1] - self.AoI_x[i])
+                * (self.AoI_y[i] + self.AoI_x[i + 1] - self.AoI_x[i]))
+            self.AoI += (T - 1 - self.AoI_x[L - 1]) * (
+            self.AoI_y[L - 1] + T - 1 - self.AoI_x[L - 1])
+            self.AoI = self.AoI / T / 2 # divide by 2 here
+        else:
+            self.AoI = (T - 1) * (T - 1) / 2
 
 # Locations of UE
 X = np.array([-278.4520829528112, -267.652186218928,
@@ -213,11 +209,6 @@ for i in range(6):
             PLr[i][j] = 79.4105566
         else:                       # non-LOS
             PLr[i][j] = 102.1895676
-    # PLr[i][j] = (161.04 + 0.4 * log10(20)
-    # - (24.37 - 2.368) * log10(25)
-    # + (43.42 - 3.1 * log10(25)) * (log10(sqrt(90225)) - 3)
-    # - 3.0980392 - (3.2 * log10(17.625) * log10(17.625) - 4.97)
-    # - 0.6 * 8.5)
 S = []                  # list of all the N's UE
 # how many UE each sector contains
 Sector = np.zeros([6], dtype = int)
@@ -227,9 +218,7 @@ for i in range(N):      # put UE to corresponding sector
     S[i].order = Sector[S[i].sector]
     Sector[S[i].sector] += 1
 for i in range(N):
-    S[i].PacketGenerate()   # pre-generate packets
     S[i].PLOS()             # compute pathloss
-    S[i].InitAoI()          # initialize AoI record
 # a table of indices of UEs in each sector 
 SectorUE = np.full([6, np.max(Sector)], -1, dtype = int)
 # build this table by checking each UE
@@ -238,75 +227,78 @@ for i in range(N):
     j = S[i].sector     # sector to which this UE belongs 
     SectorUE[j][J[j]] = i
     J[j] += 1           # index increment
-aveAoI = 0                  # average AoI
-# relays that decode successful
-helper = np.zeros([K - 1], dtype = 'b') 
 # simulate transmission 
 for i in range(6):              # for each sector
     t = 0                       # starting from time 0
     j = 0                       # UE to transmit
-    while (t < T - 1):  # take 1 timeslot to reach BS
+    while (t < T - K):
         u = SectorUE[i][j]      # the UE to transmit
-        # 0. determine which packet to send
-        # discard outdated packets
-        while (S[u].packet[0] < t):
-            S[u].packet.pop(0)
-        # then send packet[0]
-        t += 1
-        # 1. broadcast
-        # compute SNR received by BS
-        alpha = (math.sqrt(random.gauss(0, 1) ** 2
-                         + random.gauss(0, 1) ** 2)
-                    / math.sqrt(2))
-        # subtracted by pathloss
-        SNR_dB = SNR_0 - S[u].LossBS
-        SNR = alpha * (10 ** (SNR_dB / 10))
-        # determine whether BS decode successfully
-        ErrProb = (1 - beta * SNR
-                       * (math.exp(-1 * phi / SNR)
-                        - math.exp(-1 * psi / SNR)))
-        if random.random() > ErrProb:       # success
-            S[u].AOI[t] = (t - S[u].packet[0])
-        # if BS decode successfully, relays can rest
+        # 0. determine whether the packet can be sent
+        if S[u].packet > t:     # packet not yet arrive
+            t += 1
         else:
-        # 2. relays transmit
-        # compute PER from UE to relays
-            for k in range(K - 1):
+            S[u].nextPacket = S[u].packet + random.expovariate(lmb)
+            while (S[u].nextPacket <= t):
+                S[u].packet = S[u].nextPacket
+                S[u].nextPacket += random.expovariate(lmb)
+            # then send packet
+            t += 1
+            # 1. broadcast
+            # compute SNR received by BS
+            alpha = (math.sqrt(random.gauss(0, 1) ** 2
+                             + random.gauss(0, 1) ** 2)
+                    / math.sqrt(2))
+            # subtracted by pathloss
+            SNR_dB = SNR_0 - S[u].LossBS
+            SNR = alpha * (10 ** (SNR_dB / 10))
+            # determine whether BS decode successfully
+            ErrProb = (1 - beta * SNR
+                        * (math.exp(-1 * phi / SNR)
+                         - math.exp(-1 * psi / SNR)))
+            if random.random() > ErrProb:       # success
+                S[u].AoI_x.append(t)
+                S[u].AoI_y.append(t - S[u].packet)
+            # if BS decode successfully, relays can rest
+            else:
+            # 2. relays transmit
+            # compute SNR received by relays
+                for k in range(K - 1):
                 # generate Rayleigh fading coefficient
-                alpha = (math.sqrt(random.gauss(0, 1) ** 2
-                                 + random.gauss(0, 1) ** 2)
-                        / math.sqrt(2))
-                # subtracted by pathloss
-                SNR_dB = SNR_0 - S[u].LossR[j]
-                SNR_r = alpha * (10 ** (SNR_dB / 10))
-                # PER at relays
-                ErrProb = (1 - beta * SNR_r
-                           * (math.exp(-1 * phi / SNR)
-                            - math.exp(-1 * psi / SNR)))
-                # relay succeed to decode => help forward
-                if random.random() > ErrProb:
-                    helper[j] = True
-                else:
-                    helper[j] = False
-        # relays that decode successfully help
-            for j in range(K - 1):
-                if helper[j] == True:
                     alpha = (math.sqrt(random.gauss(0, 1) ** 2
                                      + random.gauss(0, 1) ** 2)
                             / math.sqrt(2))
-                    # subtracted by pathloss
-                    SNR_dB = SNR_0 + g - PLr[S[u].sector][j]
-                    # BS perform MRC
-                    SNR += alpha * (10 ** (SNR_dB / 10))
-                    t += 1
+                # subtracted by pathloss
+                    SNR_dB = SNR_0 - S[u].LossR[k]
+                    SNR_r = alpha * (10 ** (SNR_dB / 10))
+                # PER at relays
+                    ErrProb = (1 - beta * SNR_r
+                            * (math.exp(-1 * phi / SNR_r)
+                             - math.exp(-1 * psi / SNR_r)))
+                # relay decode successfully => help forward
+                    if random.random() > ErrProb:
+                        alpha = (math.sqrt(random.gauss(0, 1) ** 2
+                                         + random.gauss(0, 1) ** 2)
+                                / math.sqrt(2))
+                        # subtracted by pathloss
+                        SNR_dB = SNR_0 + g - PLr[i][k]
+                        # BS perform MRC
+                        SNR += alpha * (10 ** (SNR_dB / 10))
+                        t += 1
         # BS try to decode again
-            ErrProb = (1 - beta * SNR
-                       * (math.exp(-1 * phi / SNR)
-                        - math.exp(-1 * psi / SNR)))
-            if random.random() > ErrProb:       # success
-                S[u].AOI[t] = (t - S[u].packet[0])
-        S[u].packet.pop(0)      # this packet is sent
+                ErrProb = (1 - beta * SNR
+                        * (math.exp(-1 * phi / SNR)
+                         - math.exp(-1 * psi / SNR)))
+                if random.random() > ErrProb:       # success
+                    S[u].AoI_x.append(t)
+                    S[u].AoI_y.append(t - S[u].packet)
+            S[u].packet = S[u].nextPacket
         # 3. increment of UE index
         j += 1                  # go to next UE
         if (j >= Sector[i]):
             j = 0
+aveAoI = 0                  # average AoI
+for i in range(N):
+    S[i].ComputeAoI()
+    aveAoI += S[i].AoI
+aveAoI = aveAoI / N
+print("average AoI:", "{:.5f}".format(aveAoI))
